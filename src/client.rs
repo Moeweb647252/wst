@@ -8,12 +8,15 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_tungstenite::tungstenite::Message;
-use tracing::info;
+use tracing::{debug, info};
 
 async fn handle_connect(conn: TcpStream, url: &'static str) -> Result<()> {
+    debug!("Websocket connecting");
     let (ws, _) = tokio_tungstenite::connect_async(url).await?;
+    debug!("Websocket connected");
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (mut conn_rx, mut conn_tx) = conn.into_split();
+    ws_tx.send(Message::Text("Hello".into())).await?;
     let mut ws_rx_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
         while let Some(message) = ws_rx.next().await {
             match message? {

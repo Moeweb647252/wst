@@ -47,6 +47,7 @@ async fn handle_redirect(ws: HyperWebsocket, target: SocketAddr) -> Result<()> {
     let (mut conn_rx, mut conn_tx) = conn.into_split();
     let ws = ws.await?;
     let (mut ws_tx, mut ws_rx) = ws.split();
+    ws_tx.send(Message::Text("Hello".into())).await?;
     let mut ws_rx_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
         while let Some(message) = ws_rx.next().await {
             match message? {
