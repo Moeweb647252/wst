@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::ops::Not;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
+use tokio_util::io::SinkWriter;
 use tracing::{error, info};
 
 async fn handle_request(
@@ -52,7 +53,8 @@ async fn handle_redirect(ws: HyperWebsocket, target: SocketAddr) -> Result<()> {
         while let Some(message) = ws_rx.next().await {
             match message? {
                 Message::Binary(msg) => {
-                    conn_tx.write_all(&msg).await?;
+                    let decompressed = lz4_flex::decompress_size_prepended(&msg)?;
+                    conn_tx.write_all(&decompressed).await?;
                 }
                 _ => {}
             }
@@ -66,7 +68,8 @@ async fn handle_redirect(ws: HyperWebsocket, target: SocketAddr) -> Result<()> {
             if read == 0 {
                 break;
             }
-            ws_tx.send(Message::Binary(buffer.into())).await?;
+            let compressed = lz4_flex::compress_prepend_size(&buffer);
+            ws_tx.send(Message::Binary(compressed.into())).await?;
         }
         Ok(())
     });

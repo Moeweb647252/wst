@@ -23,3 +23,5 @@ tokio-tungstenite = { version = "0.28.0", features = [
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio-util = { version = "0.7.18", features = ["io"] }
+lz4_flex = "0.13.0"
