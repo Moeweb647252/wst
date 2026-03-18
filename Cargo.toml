@@ -8,18 +8,20 @@ anyhow = "1.0"
 bytes = "1.11"
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
-http-body-util = { version = "0.1", features = ["channel"] }
-hyper = { version = "1.8", features = ["client", "http2", "server"] }
+http-body-util = "0.1"
+hyper = { version = "1.8", features = ["http1", "server"] }
+hyper-tungstenite = "0.19"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio = { version = "1.50", features = [
     "io-util",
     "macros",
     "net",
     "rt-multi-thread",
-    "sync",
 ] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
 lz4_flex = "0.13"
 

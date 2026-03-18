@@ -1,83 +1,104 @@
 use anyhow::Result;
-use hyper::body::Incoming;
+use bytes::BytesMut;
+use futures::{SinkExt, StreamExt};
+use http_body_util::Full;
+use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper::{Response, StatusCode};
+use hyper_tungstenite::tungstenite::Message;
+use hyper_tungstenite::{self, HyperWebsocket, hyper, is_upgrade_request, upgrade};
+use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::ops::Not;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use crate::transport::{
-    TunnelBody, join_error_to_anyhow, pump_body_to_writer, pump_reader_to_body, static_response,
-    streaming_response,
-};
-
 async fn handle_request(
-    req: Request<Incoming>,
+    mut req: hyper::Request<Incoming>,
     target: SocketAddr,
     path: &'static str,
-) -> Result<Response<TunnelBody>> {
+) -> Result<hyper::Response<Full<Bytes>>> {
     if req.uri().path().eq(path).not() {
         info!("Incoming path not match: {}", req.uri().path());
-        return Ok(static_response(StatusCode::NOT_FOUND, "Not Found"));
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::<Bytes>::from("Not Found"))?);
     }
-    if req.method() != Method::POST {
-        return Ok(static_response(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "Method Not Allowed",
-        ));
+    if is_upgrade_request(&req) {
+        let (resp, ws) = upgrade(&mut req, None)?;
+        tokio::spawn(async move {
+            if let Err(err) = handle_redirect(ws, target).await {
+                error!("Error: {:?}", err);
+            }
+        });
+        Ok(resp)
+    } else {
+        Ok(Response::builder()
+            .status(StatusCode::UPGRADE_REQUIRED)
+            .body(Full::<Bytes>::from("Upgrade Required"))?)
     }
+}
 
-    let req_body = req.into_body();
-    let conn = match tokio::net::TcpStream::connect(target).await {
-        Ok(conn) => conn,
-        Err(err) => {
-            error!("Failed to connect target {target}: {err:?}");
-            return Ok(static_response(StatusCode::BAD_GATEWAY, "Bad Gateway"));
-        }
-    };
-    let (conn_rx, conn_tx) = conn.into_split();
-    let (body_tx, response) = streaming_response();
-
-    tokio::spawn(async move {
-        let mut request_handle: JoinHandle<Result<()>> =
-            tokio::spawn(async move { pump_body_to_writer(req_body, conn_tx).await });
-        let mut response_handle: JoinHandle<Result<()>> =
-            tokio::spawn(async move { pump_reader_to_body(conn_rx, body_tx).await });
-
-        let result = tokio::select! {
-            result = &mut request_handle => {
-                response_handle.abort();
-                let _ = response_handle.await;
-                result.map_err(join_error_to_anyhow).and_then(|result| result)
+async fn handle_redirect(ws: HyperWebsocket, target: SocketAddr) -> Result<()> {
+    let conn = tokio::net::TcpStream::connect(target).await?;
+    let (mut conn_rx, mut conn_tx) = conn.into_split();
+    let ws = ws.await?;
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    ws_tx.send(Message::Text("Hello".into())).await?;
+    let mut ws_rx_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
+        while let Some(message) = ws_rx.next().await {
+            match message? {
+                Message::Binary(msg) => {
+                    let decompressed = lz4_flex::decompress_size_prepended(&msg)?;
+                    conn_tx.write_all(&decompressed).await?;
+                }
+                _ => {}
             }
-            result = &mut response_handle => {
-                request_handle.abort();
-                let _ = request_handle.await;
-                result.map_err(join_error_to_anyhow).and_then(|result| result)
-            }
-        };
-
-        if let Err(err) = result {
-            error!("Tunnel relay failed: {err:?}");
         }
+        Ok(())
     });
-
-    Ok(response)
+    let mut conn_rx_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
+        loop {
+            let mut buffer = BytesMut::with_capacity(16 * 1024);
+            let read = conn_rx.read_buf(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            let compressed = lz4_flex::compress_prepend_size(&buffer);
+            ws_tx.send(Message::Binary(compressed.into())).await?;
+        }
+        Ok(())
+    });
+    tokio::select! {
+        result = &mut ws_rx_handle => {
+            conn_rx_handle.abort();
+            let _ = conn_rx_handle.await;
+            result??;
+        }
+        result = &mut conn_rx_handle => {
+            ws_rx_handle.abort();
+            let _ = ws_rx_handle.await;
+            result??;
+        }
+    }
+    Ok(())
 }
 
 pub async fn run_server(bind: SocketAddr, target: SocketAddr, path: &'static str) -> Result<()> {
     info!("Server started");
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.keep_alive(true);
     loop {
         let (socket, socket_addr) = listener.accept().await?;
         info!("New connection from {}", socket_addr);
-        let builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
-        let connection = builder.serve_connection(
-            TokioIo::new(socket),
-            service_fn(move |req| handle_request(req, target, path)),
-        );
+        let connection = http
+            .serve_connection(
+                TokioIo::new(socket),
+                service_fn(move |req| handle_request(req, target, path)),
+            )
+            .with_upgrades();
         tokio::spawn(async move {
             connection
                 .await
@@ -90,14 +111,11 @@ pub async fn run_server(bind: SocketAddr, target: SocketAddr, path: &'static str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::encode_payload;
-    use http_body_util::BodyExt;
-    use http_body_util::channel::Channel;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn http2_tunnel_forwards_request_body() -> Result<()> {
+    async fn websocket_upgrade_completes() -> Result<()> {
         let target_listener = TcpListener::bind("127.0.0.1:0").await?;
         let target_addr = target_listener.local_addr()?;
         let target_task: JoinHandle<Result<()>> = tokio::spawn(async move {
@@ -112,43 +130,28 @@ mod tests {
         let server_addr = server_listener.local_addr()?;
         let server_task: JoinHandle<Result<()>> = tokio::spawn(async move {
             let (socket, _) = server_listener.accept().await?;
-            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                .serve_connection(
-                    TokioIo::new(socket),
-                    service_fn(move |req| handle_request(req, target_addr, "/ws")),
-                )
-                .await?;
-            Ok(())
-        });
-
-        let stream = tokio::net::TcpStream::connect(server_addr).await?;
-        let (mut sender, connection) =
-            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-                .handshake(TokioIo::new(stream))
-                .await?;
-        let connection_task: JoinHandle<Result<()>> = tokio::spawn(async move {
-            connection.await?;
-            Ok(())
-        });
-        let (mut request_tx, request_body) = Channel::<bytes::Bytes, std::io::Error>::new(8);
-        let response = sender
-            .send_request(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/ws")
-                    .header(hyper::header::HOST, server_addr.to_string())
-                    .body(request_body.boxed())?,
+            let mut http = hyper::server::conn::http1::Builder::new();
+            http.keep_alive(true);
+            http.serve_connection(
+                TokioIo::new(socket),
+                service_fn(move |req| handle_request(req, target_addr, "/ws")),
             )
+            .with_upgrades()
             .await?;
-        assert_eq!(response.status(), StatusCode::OK);
+            Ok(())
+        });
 
-        request_tx.send_data(encode_payload(&[1, 2, 3])).await?;
-        drop(request_tx);
-        response.into_body().collect().await?;
+        let url = format!("ws://{server_addr}/ws");
+        let (mut ws, response) = tokio_tungstenite::connect_async(url).await?;
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        let payload = lz4_flex::compress_prepend_size(&[1, 2, 3]);
+        ws.send(tokio_tungstenite::tungstenite::Message::Binary(
+            payload.into(),
+        ))
+        .await?;
+        ws.close(None).await?;
 
         target_task.await??;
-        connection_task.abort();
-        let _ = connection_task.await;
         server_task.await??;
         Ok(())
     }

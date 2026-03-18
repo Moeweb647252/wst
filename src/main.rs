@@ -5,7 +5,6 @@ use tracing::level_filters::LevelFilter;
 
 mod client;
 mod server;
-mod transport;
 
 #[derive(Parser)]
 struct Args {
