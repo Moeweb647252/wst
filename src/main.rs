@@ -5,6 +5,7 @@ use tracing::level_filters::LevelFilter;
 
 mod client;
 mod server;
+mod transport;
 
 #[derive(Parser)]
 struct Args {
@@ -36,7 +37,7 @@ async fn main() {
     if args.client {
         let url: &'static str = args.url.expect("url should be provided").leak();
         let bind = args.bind.parse().expect("bind should be provided");
-        client::run_client(&url, bind)
+        client::run_client(url, bind)
             .await
             .expect("Failed to run client");
     } else if args.server {
@@ -46,7 +47,7 @@ async fn main() {
             args.target.expect("target should be provided").as_str(),
         )
         .expect("target should be valid socket addr");
-        server::run_server(bind, target, &path)
+        server::run_server(bind, target, path)
             .await
             .expect("Failed to run server");
     } else {
