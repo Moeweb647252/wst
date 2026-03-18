@@ -13,7 +13,6 @@ use std::net::SocketAddr;
 use std::ops::Not;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
-use tokio_util::io::SinkWriter;
 use tracing::{error, info};
 
 async fn handle_request(
@@ -147,7 +146,10 @@ mod tests {
         let url = format!("ws://{server_addr}/ws");
         let (mut ws, response) = tokio_tungstenite::connect_async(url).await?;
         assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-        ws.send(Message::Binary(vec![1, 2, 3].into())).await?;
+        ws.send(tokio_tungstenite::tungstenite::Message::Binary(
+            vec![1, 2, 3].into(),
+        ))
+        .await?;
         ws.close(None).await?;
 
         target_task.await??;
