@@ -60,7 +60,7 @@ async fn handle_redirect(ws: HyperWebsocket, target: SocketAddr) -> Result<()> {
     });
     let mut conn_rx_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
         loop {
-            let mut buffer = BytesMut::with_capacity(16 * 1024);
+            let mut buffer = BytesMut::with_capacity(512 * 1024);
             let read = conn_rx.read_buf(&mut buffer).await?;
             if read == 0 {
                 break;
